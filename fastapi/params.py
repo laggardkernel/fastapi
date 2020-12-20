@@ -221,6 +221,8 @@ class Body(FieldInfo):
         regex: Optional[str] = None,
         **extra: Any,
     ):
+        # Co(lk): embed item as a json key value
+        #  https://fastapi.tiangolo.com/tutorial/body-multiple-params/#embed-a-single-body-parameter
         self.embed = embed
         self.media_type = media_type
         super().__init__(
@@ -318,6 +320,8 @@ class Depends:
         self, dependency: Optional[Callable[..., Any]] = None, *, use_cache: bool = True
     ):
         self.dependency = dependency
+        # NOTE(lk): the Depends result (called and return result) is cached,
+        #  whether to use it or not.
         self.use_cache = use_cache
 
     def __repr__(self) -> str:

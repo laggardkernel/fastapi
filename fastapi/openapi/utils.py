@@ -323,7 +323,7 @@ def get_flat_models_from_routes(
                 callback_flat_models |= get_flat_models_from_routes(route.callbacks)
             params = get_flat_params(route.dependant)
             request_fields_from_routes.extend(params)
-
+    # TODO(lk): ?
     flat_models = callback_flat_models | get_flat_models_from_fields(
         body_fields_from_routes + responses_from_routes + request_fields_from_routes,
         known_models=set(),
@@ -350,6 +350,7 @@ def get_openapi(
     components: Dict[str, Dict[str, Any]] = {}
     paths: Dict[str, Dict[str, Any]] = {}
     flat_models = get_flat_models_from_routes(routes)
+    # Co(lk): {model: name}
     model_name_map = get_model_name_map(flat_models)
     definitions = get_model_definitions(
         flat_models=flat_models, model_name_map=model_name_map

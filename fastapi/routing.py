@@ -106,13 +106,20 @@ async def serialize_response(
 ) -> Any:
     if field:
         errors = []
+        # Co(lk): prepare the field recursively, return a dict or list whose
+        #  value is Python builtin type, which makes sure the result is
+        #  json serializable. The include, exclude filtering is done
+        #  in jsonable_encoder()
         response_content = _prepare_response_content(
             response_content,
             exclude_unset=exclude_unset,
             exclude_defaults=exclude_defaults,
             exclude_none=exclude_none,
         )
+        # Co(lk): validate the json serialized dict
         if is_coroutine:
+            # NOTE(lk): response field, the Response Model (pydantic model) defined
+            #  by you
             value, errors_ = field.validate(response_content, {}, loc=("response",))
         else:
             value, errors_ = await run_in_threadpool(
@@ -143,7 +150,7 @@ async def run_endpoint_function(
     # Only called by get_request_handler. Has been split into its own function to
     # facilitate profiling endpoints, since inner functions are harder to profile.
     assert dependant.call is not None, "dependant.call must be a function"
-
+    # endpont/view_func is save as Dependant.call, extract it and run it.
     if is_coroutine:
         return await dependant.call(**values)
     else:
@@ -173,6 +180,7 @@ def get_request_handler(
         actual_response_class = response_class
 
     async def app(request: Request) -> Response:
+        # Co(lk): parse body from Request
         try:
             body = None
             if body_field:
@@ -188,14 +196,28 @@ def get_request_handler(
             raise HTTPException(
                 status_code=400, detail="There was an error parsing the body"
             ) from e
+        # Co(lk): apply dependencies on request
         solved_result = await solve_dependencies(
             request=request,
             dependant=dependant,
             body=body,
             dependency_overrides_provider=dependency_overrides_provider,
         )
+        """
+        Co(lk):
+        - values: dict of all params: query, path, ..., depends, etc. for the
+          view_func, or the root dependant
+        - errors: self explained
+        - background_tasks: self explained
+        - sub_response: `Depends` (dev defined dependencies) may wanna change
+          the response. Cause the resp is not available, put the mofification
+          onto a placeholder. Later merge the mod onto the resp got from endpoint/view.
+        -  _: is dependency_cache, shared between sub-dependant and child-dependant
+          to cache `depends_func()` results. Not used any more in top level.
+        """
         values, errors, background_tasks, sub_response, _ = solved_result
         if errors:
+            # Co(lk): errors are collected and raised in batch
             raise RequestValidationError(errors, body=body)
         else:
             raw_response = await run_endpoint_function(
@@ -206,6 +228,10 @@ def get_request_handler(
                 if raw_response.background is None:
                     raw_response.background = background_tasks
                 return raw_response
+            # Co(lk): if raw_response is dict, or list, prepare it and
+            #  validate it with response_field, which is an instance of Pydantic model
+            #  serialize_response() makes the response is json serializable,
+            #  values of whom is python builtin typs
             response_data = await serialize_response(
                 field=response_field,
                 response_content=raw_response,
@@ -222,6 +248,8 @@ def get_request_handler(
                 status_code=status_code,
                 background=background_tasks,  # type: ignore # in Starlette
             )
+            # Co(lk): override response headers with sub_resp composed from Depends
+            #  https://fastapi.tiangolo.com/advanced/response-headers/
             response.headers.raw.extend(sub_response.headers.raw)
             if sub_response.status_code:
                 response.status_code = sub_response.status_code
@@ -261,13 +289,23 @@ class APIWebSocketRoute(routing.WebSocketRoute):
         self.path = path
         self.endpoint = endpoint
         self.name = get_name(endpoint) if name is None else name
+        # Co(lk): build root node of dependant tree, from view_func
         self.dependant = get_dependant(path=path, call=self.endpoint)
         self.app = websocket_session(
+            # NOTE(lk): websocket_session() accepts a callable, func(session),
+            #  It's get_websocket_app() in this case, which resolve dependencies
             get_websocket_app(
                 dependant=self.dependant,
                 dependency_overrides_provider=dependency_overrides_provider,
             )
         )
+        # Co(lk): compile_path, old formula from Starlette. Returns
+        # - regex pattern of the uri_template (mainly for variable names)
+        # - format style of the uri_template
+        # - dict: {var_name: convertor_instance}
+        # regex:      "/(?P<username>[^/]+)"
+        # format:     "/{username}"
+        # convertors: {"username": StringConvertor()}
         self.path_regex, self.path_format, self.param_convertors = compile_path(path)
 
 
@@ -312,6 +350,8 @@ class APIRoute(routing.Route):
         if methods is None:
             methods = ["GET"]
         self.methods: Set[str] = set([method.upper() for method in methods])
+        # Co(lk): used to differentiate field in field names
+        #  unique_id = f"{ascii(name+path)_{method.lower()}"
         self.unique_id = generate_operation_id_for_path(
             name=self.name, path=self.path_format, method=list(methods)[0]
         )
@@ -321,6 +361,7 @@ class APIRoute(routing.Route):
                 status_code not in STATUS_CODES_WITH_NO_BODY
             ), f"Status code {status_code} must not have a response body"
             response_name = "Response_" + self.unique_id
+            # Co(lk): init a ModelField instance, all Pydantic related
             self.response_field = create_response_field(
                 name=response_name, type_=self.response_model
             )
@@ -334,10 +375,13 @@ class APIRoute(routing.Route):
             self.secure_cloned_response_field: Optional[
                 ModelField
             ] = create_cloned_field(self.response_field)
+            # NOTE(lk): clone a resp field to avoid subclass of resp passes validation
+            #  of it's parent class
         else:
             self.response_field = None  # type: ignore
             self.secure_cloned_response_field = None
         self.status_code = status_code
+        # NOTE(lk): OpenAPI related: tags, summary, desc, deprecated, operation_id
         self.tags = tags or []
         if dependencies:
             self.dependencies = list(dependencies)
@@ -351,6 +395,7 @@ class APIRoute(routing.Route):
         self.response_description = response_description
         self.responses = responses or {}
         response_fields = {}
+        # Co(lk): responses={404: {"model": Message}
         for additional_status_code, response in self.responses.items():
             assert isinstance(response, dict), "An additional response must be a dict"
             model = response.get("model")
@@ -367,6 +412,9 @@ class APIRoute(routing.Route):
             self.response_fields = {}
         self.deprecated = deprecated
         self.operation_id = operation_id
+        # NOTE(lk): Response Model field processing params
+        #  check tests for detail. e.g.
+        #  Field(alias="alias_name"), use `alias_name` key value from rv of endpoint
         self.response_model_include = response_model_include
         self.response_model_exclude = response_model_exclude
         self.response_model_by_alias = response_model_by_alias
@@ -376,9 +424,15 @@ class APIRoute(routing.Route):
         self.include_in_schema = include_in_schema
         self.response_class = response_class
 
+        # Co(lk): no class-based view support because of reflection
         assert callable(endpoint), "An endpoint must be a callable"
+        # Co(lk): build the dependant recursively, possible types of dependants
+        #  - endpoint, view_function
+        #  - Depends instance, user defined check
+        #  - annotation, for validation and conversion
         self.dependant = get_dependant(path=self.path_format, call=self.endpoint)
         for depends in self.dependencies[::-1]:
+            # Co(lk): insert global dependencies in reversed order
             self.dependant.dependencies.insert(
                 0,
                 get_parameterless_sub_dependant(depends=depends, path=self.path_format),
@@ -386,6 +440,7 @@ class APIRoute(routing.Route):
         self.body_field = get_body_field(dependant=self.dependant, name=self.unique_id)
         self.dependency_overrides_provider = dependency_overrides_provider
         self.callbacks = callbacks
+        # Co(lk): callable(scope, rec, send) -> endpoint(req)
         self.app = request_response(self.get_route_handler())
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -444,6 +499,7 @@ class APIRouter(routing.Router):
         self.include_in_schema = include_in_schema
         self.responses = responses or {}
         self.callbacks = callbacks or []
+        # Co(lk): FastAPI app instance
         self.dependency_overrides_provider = dependency_overrides_provider
         self.route_class = route_class
         self.default_response_class = default_response_class

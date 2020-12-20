@@ -110,6 +110,8 @@ def get_param_sub_dependant(
     *, param: inspect.Parameter, path: str, security_scopes: Optional[List[str]] = None
 ) -> Dependant:
     depends: params.Depends = param.default
+    # Co(lk): use Depends.dependency function, or the annotation
+    #  If it's an instance of `Depends`, get sub dependant recursively
     if depends.dependency:
         dependency = depends.dependency
     else:
@@ -138,6 +140,8 @@ def get_sub_dependant(
     name: Optional[str] = None,
     security_scopes: Optional[List[str]] = None,
 ) -> Dependant:
+    # Co(lk): Security(Depends)
+    #  https://fastapi.tiangolo.com/advanced/security/oauth2-scopes/
     security_requirement = None
     security_scopes = security_scopes or []
     if isinstance(depends, params.Security):
@@ -159,6 +163,7 @@ def get_sub_dependant(
     )
     if security_requirement:
         sub_dependant.security_requirements.append(security_requirement)
+    # TODO: why not set security_scopes on init?
     sub_dependant.security_scopes = security_scopes
     return sub_dependant
 
@@ -212,6 +217,7 @@ def get_flat_params(dependant: Dependant) -> List[ModelField]:
 
 
 def is_scalar_field(field: ModelField) -> bool:
+    # Co(lk): basically means it's type defined in params.py, but not params.Body
     field_info = field.field_info
     if not (
         field.shape == SHAPE_SINGLETON
@@ -278,17 +284,22 @@ def check_dependency_contextmanagers() -> None:
 
 def get_dependant(
     *,
-    path: str,
-    call: Callable[..., Any],
-    name: Optional[str] = None,
-    security_scopes: Optional[List[str]] = None,
-    use_cache: bool = True,
-) -> Dependant:
+        path: object,  # Co(lk): path_format
+        call: object,  # Co(lk): endpoint/view_func
+        name: object = None,
+        security_scopes: object = None,
+        use_cache: object = True,
+) -> object:
+    # Co(lk): {foo}, path_format of uri template
     path_param_names = get_path_param_names(path)
+    # Co(lk): get dependent from call/endpoint, inspect and get Depends args
+    #  from endpoint function
     endpoint_signature = get_typed_signature(call)
     signature_params = endpoint_signature.parameters
     if is_gen_callable(call) or is_async_gen_callable(call):
+        # NOTE(lk): make sure AsyncExitStack exists
         check_dependency_contextmanagers()
+    # TODO(lk): why not set security_scopes?
     dependant = Dependant(call=call, name=name, path=path, use_cache=use_cache)
     for param_name, param in signature_params.items():
         if isinstance(param.default, params.Depends):
@@ -297,12 +308,25 @@ def get_dependant(
             )
             dependant.dependencies.append(sub_dependant)
             continue
+        # Co(lk): If `param` is not `Depends`, extract info from `param` onto `dependant`
+        #  In fact, we're categorizing and storing them.
+        # Co(lk): Request, Websocket, HTTPConnection, Response, BackgroundTasks
+        #  SecurityScope. skip storing these onto Dependant
         if add_non_field_param_to_dependency(param=param, dependant=dependant):
             continue
+        # NOTE(lk): default field info "params.Query". e.g. in Depends(common_parameters)
+        # async def common_parameters(q: Optional[str] = None, skip: int = 0, limit: int = 100):
+        #     return {"q": q, "skip": skip, "limit": limit}
+        #  Convert param into types defined in params.py, use Query as the default type
+        #   if the type defined in annotation is not subclass of pydantic `FieldInfo`
         param_field = get_param_field(
             param=param, default_field_info=params.Query, param_name=param_name
         )
+        # Co(lk): add_param_to_fields() is used for Param:
+        #  Path, Header, Query, Cookie
+        # Co(lk): Storing Path onto Dependant
         if param_name in path_param_names:
+            # Co(lk): basically means it's type defined in params.py, but not params.Body
             assert is_scalar_field(
                 field=param_field
             ), "Path params must be of one of the supported types"
@@ -320,11 +344,19 @@ def get_dependant(
             add_param_to_fields(field=param_field, dependant=dependant)
         elif is_scalar_field(field=param_field):
             add_param_to_fields(field=param_field, dependant=dependant)
+        # Co(lk): not params.Param, but its default includes.
+        #  sequence of Query, Header. May be sequence of str, int, etc.
+        #  In that case, need to convert the sequence into Query, Header.
+        #  Yes, Header could be sequence value. It's valid to pass multiple
+        #  header with the same key/header. But from what I heard, not every
+        #  server support it.
+        # TODO(lk): find the RFC for sequence header specification.
         elif isinstance(
             param.default, (params.Query, params.Header)
         ) and is_scalar_sequence_field(param_field):
             add_param_to_fields(field=param_field, dependant=dependant)
         else:
+            # Non params.Param, must be Body and its subclasses
             field_info = param_field.field_info
             assert isinstance(
                 field_info, params.Body
@@ -480,6 +512,11 @@ async def solve_dependencies(
 ]:
     values: Dict[str, Any] = {}
     errors: List[ErrorWrapper] = []
+    # Co(lk): init empty response, empty dependency_cache in the root dependant,
+    #  and pass it to underlining sub dependants.
+    # response: serves as a placeholder to storing resp header, status code modification
+    #  made in dependant. Later, it will be merged and overridden on the real resp
+    #  generate from endpoint/view_func.
     response = response or Response(
         content=None,
         status_code=None,  # type: ignore
@@ -489,6 +526,7 @@ async def solve_dependencies(
     )
     dependency_cache = dependency_cache or {}
     sub_dependant: Dependant
+    # Co(lk): if it's not the leaf node
     for sub_dependant in dependant.dependencies:
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         sub_dependant.cache_key = cast(
@@ -496,6 +534,9 @@ async def solve_dependencies(
         )
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
+        # NOTE(lk): FastAPI.dependency_overrides: {}, could be set after app inited
+        #  key is dependency func, not func name string
+        #  https://fastapi.tiangolo.com/advanced/testing-dependencies/
         if (
             dependency_overrides_provider
             and dependency_overrides_provider.dependency_overrides
@@ -505,14 +546,17 @@ async def solve_dependencies(
                 dependency_overrides_provider, "dependency_overrides", {}
             ).get(original_call, original_call)
             use_path: str = sub_dependant.path  # type: ignore
+            # Co(lk): cause we're using an overridden dependant, rebuild the
+            #  specific dependent node for this fake dependant
             use_sub_dependant = get_dependant(
                 path=use_path,
                 call=call,
                 name=sub_dependant.name,
                 security_scopes=sub_dependant.security_scopes,
             )
+            # TODO(lk): why not security_scopes set in get_dependant()
             use_sub_dependant.security_scopes = sub_dependant.security_scopes
-
+            # Co(lk): if not need to override a Depends, just do as normal
         solved_result = await solve_dependencies(
             request=request,
             dependant=use_sub_dependant,
@@ -535,7 +579,11 @@ async def solve_dependencies(
             continue
         if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:
             solved = dependency_cache[sub_dependant.cache_key]
+        # Co(lk): if not cached, call `Depends_func(**sub_values)`
         elif is_gen_callable(call) or is_async_gen_callable(call):
+            # NOTE(lk): AsyncExitStack is required, but exc is not raised until
+            #  solve_dependencies(). It's only required when call/endpoint/view_func
+            #  is a generator
             stack = request.scope.get("fastapi_astack")
             if stack is None:
                 raise RuntimeError(
@@ -552,6 +600,9 @@ async def solve_dependencies(
             values[sub_dependant.name] = solved
         if sub_dependant.cache_key not in dependency_cache:
             dependency_cache[sub_dependant.cache_key] = solved
+    # Co(lk): else, if it's a leaf node, or sub-dependant is solved.
+    #  get the fields needed by dependant (defined by Param, Body) into dict foo_values
+    #  compose the fields/params needed by dependant into a dict `values`
     path_values, path_errors = request_params_to_args(
         dependant.path_params, request.path_params
     )
@@ -589,6 +640,8 @@ async def solve_dependencies(
             background_tasks = BackgroundTasks()
         values[dependant.background_tasks_param_name] = background_tasks
     if dependant.response_param_name:
+        # NOTE(lk): response is not changed in solve_dependency(), but in
+        #  the Depends defined by users -- web developers
         values[dependant.response_param_name] = response
     if dependant.security_scopes_param_name:
         values[dependant.security_scopes_param_name] = SecurityScopes(
@@ -735,11 +788,15 @@ def get_schema_compatible_field(*, field: ModelField) -> ModelField:
 
 
 def get_body_field(*, dependant: Dependant, name: str) -> Optional[ModelField]:
+    # Co(lk): track dependant recursively and flat dep into one dependant
+    #  expand list like dependant.path_params
     flat_dependant = get_flat_dependant(dependant)
     if not flat_dependant.body_params:
         return None
     first_param = flat_dependant.body_params[0]
     field_info = first_param.field_info
+    # Co(lk): embed, the body param is parsed from the root json request, or
+    #  under a key of the json request
     embed = getattr(field_info, "embed", None)
     body_param_names_set = {param.name for param in flat_dependant.body_params}
     if len(body_param_names_set) == 1 and not embed:
@@ -753,6 +810,8 @@ def get_body_field(*, dependant: Dependant, name: str) -> Optional[ModelField]:
         setattr(param.field_info, "embed", True)
     model_name = "Body_" + name
     BodyModel = create_model(model_name)
+    # Co(lk): iterate all possible field from body_params, which is a list
+    #  of body_param from root dependant and its child dependants
     for f in flat_dependant.body_params:
         BodyModel.__fields__[f.name] = get_schema_compatible_field(field=f)
     required = any(True for f in flat_dependant.body_params if f.required)

@@ -66,6 +66,7 @@ class FastAPI(Starlette):
     ) -> None:
         self._debug: bool = debug
         self.state: State = State()
+        # NOTE(lk): router, subclass of starlette Rotuer
         self.router: routing.APIRouter = routing.APIRouter(
             routes=routes,
             dependency_overrides_provider=self,
@@ -74,10 +75,12 @@ class FastAPI(Starlette):
             default_response_class=default_response_class,
             dependencies=dependencies,
             callbacks=callbacks,
+            # Co(lk): deprecated, flags used in OpenAPI
             deprecated=deprecated,
             include_in_schema=include_in_schema,
             responses=responses,
         )
+        # Co(lk): handle http error code, or Exception
         self.exception_handlers: Dict[
             Union[int, Type[Exception]],
             Callable[[Request, Any], Coroutine[Any, Any, Response]],
@@ -85,18 +88,21 @@ class FastAPI(Starlette):
             {} if exception_handlers is None else dict(exception_handlers)
         )
         self.exception_handlers.setdefault(HTTPException, http_exception_handler)
+        # Co(lk): this is where's the 422 validation resp comes from
         self.exception_handlers.setdefault(
             RequestValidationError, request_validation_exception_handler
         )
-
+        # Co(lk): old formula, build mw stack. closure inner closure.
         self.user_middleware: List[Middleware] = (
             [] if middleware is None else list(middleware)
         )
         self.middleware_stack: ASGIApp = self.build_middleware_stack()
 
+        # Co(lk): new param introduced in FastAPI
         self.title = title
         self.description = description
         self.version = version
+        # Co(lk): multiple server url/info for req generation in swagger ui
         self.servers = servers or []
         self.openapi_url = openapi_url
         self.openapi_tags = openapi_tags
@@ -109,12 +115,16 @@ class FastAPI(Starlette):
                 "https://fastapi.tiangolo.com/advanced/sub-applications/"
             )
         self.root_path = root_path or openapi_prefix
+        # Co(lk): include root_path in swagger server infos or not
         self.root_path_in_servers = root_path_in_servers
         self.docs_url = docs_url
         self.redoc_url = redoc_url
         self.swagger_ui_oauth2_redirect_url = swagger_ui_oauth2_redirect_url
         self.swagger_ui_init_oauth = swagger_ui_init_oauth
         self.extra = extra
+        # NOTE(lk): dependency_overrides, used to override specific Depends,
+        #  mainly for tests
+        #  https://fastapi.tiangolo.com/advanced/testing-database/#dependency-override
         self.dependency_overrides: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
         self.openapi_version = "3.0.2"
@@ -126,6 +136,7 @@ class FastAPI(Starlette):
         self.setup()
 
     def openapi(self) -> Dict[str, Any]:
+        # TODO(lk):
         if not self.openapi_schema:
             self.openapi_schema = get_openapi(
                 title=self.title,
@@ -139,27 +150,37 @@ class FastAPI(Starlette):
         return self.openapi_schema
 
     def setup(self) -> None:
+        # Co(lk): setup open API view, return json of schema
         if self.openapi_url:
+            # Co(lk): multiple server url/info for req generation in swagger ui
+            # servers=[
+            #     {"url": "https://stag.example.com", "description": "Staging environment"},
+            #     {"url": "https://prod.example.com", "description": "Production environment"},
+            # ],
             urls = (server_data.get("url") for server_data in self.servers)
             server_urls = {url for url in urls if url}
 
             async def openapi(req: Request) -> JSONResponse:
                 root_path = req.scope.get("root_path", "").rstrip("/")
                 if root_path not in server_urls:
+                    # Co(lk): include root_path in swagger server infos or not
                     if root_path and self.root_path_in_servers:
                         self.servers.insert(0, {"url": root_path})
                         server_urls.add(root_path)
                 return JSONResponse(self.openapi())
-
+            # Co(lk): don't include the view itself in api schema
             self.add_route(self.openapi_url, openapi, include_in_schema=False)
+        # Co(lk): add swagger ui, could be deemed as an HTML version of the openapi?
         if self.openapi_url and self.docs_url:
 
             async def swagger_ui_html(req: Request) -> HTMLResponse:
+                # Co(lk): add root_path, in case the app is deployed under a sub path
                 root_path = req.scope.get("root_path", "").rstrip("/")
                 openapi_url = root_path + self.openapi_url
                 oauth2_redirect_url = self.swagger_ui_oauth2_redirect_url
                 if oauth2_redirect_url:
                     oauth2_redirect_url = root_path + oauth2_redirect_url
+                # TODO(lk): difference between oauth redirect and init auth url?
                 return get_swagger_ui_html(
                     openapi_url=openapi_url,
                     title=self.title + " - Swagger UI",
@@ -191,8 +212,12 @@ class FastAPI(Starlette):
             self.add_route(self.redoc_url, redoc_html, include_in_schema=False)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Co(lk): set scope["root_path"] if the app is inited to worker under a path
         if self.root_path:
             scope["root_path"] = self.root_path
+        # TODO(lk): new in 3.7. check what this "fastapi_astack" helps
+        #  When lack of AsyncExitStack, the framework doesn't function, but
+        #  but it's only required when the endpoint/view_func is a generator
         if AsyncExitStack:
             async with AsyncExitStack() as stack:
                 scope["fastapi_astack"] = stack
@@ -219,6 +244,7 @@ class FastAPI(Starlette):
         response_model_include: Optional[Union[SetIntStr, DictIntStrAny]] = None,
         response_model_exclude: Optional[Union[SetIntStr, DictIntStrAny]] = None,
         response_model_by_alias: bool = True,
+        # Co(lk): the exclude is used for Response Model to drop some fields
         response_model_exclude_unset: bool = False,
         response_model_exclude_defaults: bool = False,
         response_model_exclude_none: bool = False,
